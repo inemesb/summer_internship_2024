@@ -6,14 +6,13 @@ output:
   pdf_document: default
   html_notebook: default
 ---
+# Load files and libraries
 ```{r}
 wd <- "~/OneDrive/Dokumenter/Sommerprosjekt24/BARNYARD_DEC23_DATA/"
 setwd(wd)
-#RAW TABLE WITH BARCODE USED AS A COLUMN
-#d <- read.csv(file="metadata_combined_H3K27me3_H3K27ac.csv")
-d <- read.csv(file="H3K27ac_metadata_merged.csv")
+
+d <- read.csv(file="H3K27ac_metadata_merged.csv") 
 #d <- read.csv(file="metadata_merged_DEC23_Barnyard_H3K27me3.csv")
-#d <- read.csv(file="metadata_merged_R_fixed_nanoscope_15JULY2024_ac.csv")
 ```
 
 ```{r}
@@ -21,6 +20,7 @@ library(mclust)
 library(ggplot2)
 library(dplyr)
 library(mixsmsn)
+library(tidyr)
 ```
 
 ## Adding pseudocounts
@@ -33,7 +33,8 @@ d$passed_filters_GRCh38_pseudo <- d$passed_filters_GRCh38 + 1
 d$passed_filters_mm10_pseudo <- d$passed_filters_mm10 + 1
 ```
 
-## Quality control
+# Quality control
+We will use a knee plot to see thresholds for where to cut off non-cells.
 ```{r}
 kneeplot <- function(d, column) {
   column_sym <- sym(column)  
@@ -79,7 +80,6 @@ cat("Number of rows with 'passed_filters' > 100:", count_high_passed_filters, "\
 ## In silico merging
 To compare the collision rates between pre-indexed reads which have single cell barcodes + different Tn5 barcodes and reads with only single cell barcodes, we aggregate based on single cell barcode to ignore Tn5 barcodes. 
 Counts are summed together between different samples.
-Is it even possible to aggregate the cellranger classifications? When combining the reads, we would have to calculate a new classification based on the ratios.
 
 ```{r}
 # combine rows with the same single cell barcode and sum the contents together
@@ -95,15 +95,16 @@ d.aggr <- d.fil %>%
 
 The merged dataframe only contains unique single cell barcodes, by summing the fragments together from different Tn5 barcodes.
 ```{r}
-#DISPLAY THE UNIQUE BARCODES IN A DATAFRAME
+# display uniqu barcodes in the dataframe
 unique_barcode_count <- length(unique(d.fil$barcode))
-# Print the count
+# print the count
 cat("Number of unique single cell barcodes:", unique_barcode_count, "\n")
 cat("Number of points with pre-indexing:", length(d.fil$barcode),"\n")
 cat("Number of points without pre-indexing (in silico merged):",length(d.aggr$barcode))
 ```
 ## Plotting functions
 ```{r}
+# define functions for logarithmic and linear scatterplots.
 scatterplot_log <- function(data, col){
   ggplot(data = data, aes(x = passed_filters_GRCh38_pseudo, y = passed_filters_mm10_pseudo)) +
     geom_point(aes(col = col), size = 0.3) +
@@ -131,6 +132,7 @@ scatterplot_linear <- function(data, col){
     scale_color_manual(values = c(collision = "grey", human = "red", mouse = "blue"))
 }
 
+# function which prints counts of each classification and the ratio of collisions
 print_counts <- function(classification){
   class_counts <- table(classification)
   print(class_counts)
@@ -142,10 +144,11 @@ Using collisions according to cellranger, where both is_mm10_cell_barcode == 1 a
 Cellranger estimation:
 "Among all barcodes called as cell-associated, they are initially classified as Human or Mouse by which genome has more total UMI counts for that barcode. Barcodes with total UMI counts that exceed the 10th percentile of the distributions for both Human and Mouse are called as observed multiplets."
 This is probably not the most accurate characterization of species, we therefore want to investigate other methods of classifying collisions.
-    Also, when we do in silico merging of data the classifications would maybe not be accurate anymore as the ratio of fragments could change.
+Also, when we do in silico merging of data the classifications would maybe not be accurate anymore as the ratio of fragments could change.
     
 ### Pre-indexed samples
 ```{r}
+# define the class as human, mouse, or collision
 d.fil$cellranger_class <- 'empty_droplet'
 d.fil$cellranger_class[which(as.logical(d.fil$is_GRCh38_cell_barcode))] <- 'human'
 d.fil$cellranger_class[which(as.logical(d.fil$is_mm10_cell_barcode))] <- 'mouse'
@@ -172,15 +175,11 @@ scatterplot_log(d.aggr, d.aggr$cellranger_class)
 scatterplot_linear(d.aggr, d.aggr$cellranger_class)
 ```
 
-
 ```{r}
 print_counts(d.aggr$cellranger_class)
 ```
 # GAUSSIAN MIXTURE MODEL
-The Guassian mixture model (GMM) is a machine learning method used to determine the probability that each data point belongs in a given cluster. As opposed to k-means clustering, GMM is a soft clustering method which means in addition to classifying it gives a measure of how much a data point is associated with each cluster.
-
-https://builtin.com/articles/gaussian-mixture-model
-
+The Guassian mixture model (GMM) is a machine learning method used to determine the probability that each data point belongs in a given cluster.
 In this case, we want to classify each droplet as human, mouse, or collision based on the ratio of human reads/mouse reads.
 
 ### Pre-indexed samples
@@ -206,8 +205,9 @@ d.fil <- d.fil %>%
 ```
 
 ```{r}
+# function for the plotting the mixture mode histograms
 mm_hist <- function(data, classification) {
-  classification_sym <- sym(classification)  # Convert classification column name to a symbol
+  classification_sym <- sym(classification)  # needed to use string input
 
   ggplot(data = data, aes(x = ratio, fill = !!classification_sym)) + 
     geom_histogram(col = 'black', binwidth = 0.25, alpha = 0.2) + 
@@ -254,12 +254,12 @@ print_counts(d.aggr$gmm_class)
 ```
 # Skew-normal distribution mixture model
 As it seems like the distributions of ratios in the pre-indexed samples are skewed, we can try a model which does not assume gaussian distribution.
-All degrees of freedom (nu) seem to give similar criteria scores.
+All degrees of freedom (nu) seem to give similar criteria scores; this parameter does not have an impact when family = "Skew.normal"
 
 smsn.mix(d.fil$ratio, nu = 10, g = 3, group = TRUE, family = "Skew.normal", obs.prob = TRUE), where nu is degrees of freedom, g is the number of mixture components to be fitted, group = TRUE saves category, obs.prob = TRUE saves probability of being in each group for each barcode.
 ### Pre-indexed samples
 ```{r}
-# Fit a mixture model with skew-normal distributions
+# fit a mixture model with skew-normal distributions
 d.fil_skew <- smsn.mix(d.fil$ratio, nu = 1, g = 3, group = TRUE, family = "Skew.normal", obs.prob = TRUE)
 
 d.fil$mix_class <- 'unknown'
@@ -267,6 +267,7 @@ d.fil$mix_class[is.finite(d.fil$ratio)] <- as.character(d.fil_skew$group)
 d.fil$mix_class <- as.factor(d.fil$mix_class)
 ```
 ```{r}
+# needed to assign the right classes to each group
 # assigning the classes to the right group based on low, middle, and high means.
 component_means <- d.fil_skew$mu
 ordered_indices <- order(component_means)
@@ -297,7 +298,6 @@ print_counts(d.fil$mix_class)
 ```
 ### Merged samples
 ```{r}
-# Fit a mixture model with skew-normal distributions
 d.aggr_skew <- smsn.mix(d.aggr$ratio, nu = 1, g = 3, group = TRUE, family = "Skew.normal", obs.prob = TRUE)
 
 d.aggr$mix_class <- 'unknown'
@@ -331,18 +331,10 @@ scatterplot_linear(d.aggr,d.aggr$mix_class)
 print_counts(d.aggr$mix_class)
 ``` 
 
-```{r}
-d.aggr_probs <- data.frame(d.aggr_skew$obs.prob)
-colnames(d.aggr_probs) <- class_mapping
-hist(d.aggr_probs$collision, breaks = 100)
-hist(d.aggr_probs$human, breaks = 100)
-hist(d.aggr_probs$mouse, breaks = 100)
-```
-
 # Classification 1: percentage cutoff - 90%
 
 ```{r}
-#when having more than 90% of the unique reads, called it a single cell. Otherwise a collision
+#when having more than 90% of the unique reads, assign to that species. Otherwise a collision.
 d.fil <- d.fil %>%
   mutate(passed_filters_ratio_GRCh38 = passed_filters_GRCh38_pseudo / passed_filters,
          passed_filters_ratio_mm10 = passed_filters_mm10_pseudo / passed_filters,
@@ -377,6 +369,7 @@ scatterplot_linear(d.aggr, d.aggr$classification_I)
 # Classification 2: read ratios, -3 and 3
 
 ```{r}
+# if a droplet has a log ratio of more than 3 or -3 between human and mouse reads it is a collision.
 d.fil <- d.fil %>%
   mutate(passed_filters_ratio = log2(passed_filters_GRCh38_pseudo / passed_filters_mm10_pseudo) ,
          classification_II = case_when(
@@ -402,8 +395,11 @@ scatterplot_log(d.aggr, d.aggr$classification_II)
 scatterplot_linear(d.fil, d.fil$classification_II)
 scatterplot_linear(d.aggr, d.aggr$classification_II)
 ```
+
 # Classification III: number of reads, 50
+
 ```{r}
+# if a droplet has more than 50 reads of both cells it is a collision
 d.fil <- d.fil %>%
   mutate(classification_III = case_when(
     passed_filters_mm10_pseudo > 50 & passed_filters_GRCh38_pseudo < 50 ~ "mouse",
@@ -429,7 +425,7 @@ scatterplot_linear(d.fil, d.fil$classification_III)
 scatterplot_linear(d.aggr, d.aggr$classification_III)
 ```
 
-# CLASSIFICATION COMPARISONS
+# SUMMARY
 ```{r}
 # make dataframe with all predicted classes for comparison
 d.fil_allclass <- d.fil[c("barcode","cellranger_class","gmm_class","mix_class","classification_I","classification_II","classification_III")]
@@ -437,9 +433,9 @@ d.aggr_allclass <- d.aggr[c("barcode","cellranger_class","gmm_class","mix_class"
 ```
 
 ```{r}
-# define functions
-library(tidyr)
+# define summary functions
 
+# text summary of all classifications
 collision.summary <- function(df){
   for (column in c(names(df)[2:3])){
   class_counts <- table(df[[column]])
@@ -449,10 +445,11 @@ collision.summary <- function(df){
   cat("Ratio of collisions: ", class_counts[["collision"]]/sum(class_counts),"\n","\n")}
 }
 
+# stacked barplot to summarize different classifications
 plot.stacked <- function(df, datatype) {
   df_long <- pivot_longer(df, cols = colnames(df)[3:4], names_to = "classification_type", values_to = "class")
   
-  # Summarize the counts and calculate ratios for each class within each classification type
+  # summarize the counts and calculate ratios for each class within each classification type
   counts <- df_long %>%
     group_by(classification_type, class) %>%
     summarise(count = n(), .groups = 'drop') %>%
